@@ -11,10 +11,20 @@ class Config:
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     
     # Session settings
-    SESSION_COOKIE_SECURE = False  # Set to True in production with HTTPS
+    SESSION_COOKIE_SECURE = False
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = 'Lax'
+    SESSION_COOKIE_NAME = 'secure_chat_session'
     PERMANENT_SESSION_LIFETIME = 86400  # 24 hours in seconds
+    
+    # CORS settings (for React frontend)
+    CORS_ORIGINS = [
+        'http://localhost:3000', 
+        'http://localhost:5173'
+    ]
+    
+    # Signature settings
+    SIGNATURE_MAX_AGE = 300  # 5 minutes for timestamp validation
     
     # Application settings
     DEBUG = False

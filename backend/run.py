@@ -3,7 +3,7 @@
 
 import os
 from app import create_app, db
-from app.models import User, Conversation, Message, ConversationParticipant, Key, File, MessageReadStatus
+from app.models import User, Conversation, Message, ConversationParticipant, Key, File, MessageReadStatus, FriendRequest
 
 # Create the Flask application
 app = create_app(os.getenv('FLASK_ENV', 'development'))
@@ -20,7 +20,8 @@ def make_shell_context():
         'ConversationParticipant': ConversationParticipant,
         'Key': Key,
         'File': File,
-        'MessageReadStatus': MessageReadStatus
+        'MessageReadStatus': MessageReadStatus,
+        'FriendRequest': FriendRequest
     }
 
 

@@ -14,13 +14,15 @@ class User(db.Model):
     password_hash = db.Column(db.String(256), nullable=False)
     encrypted_private_key = db.Column(db.Text, nullable=False)
     public_key = db.Column(db.Text, nullable=False)
-    encryption_iv = db.Column(db.String(32), nullable=False)
+    encryption_iv = db.Column(db.String(24), nullable=False)  # 12 bytes = 24 hex chars for AES-GCM
     
     # Relationships
     keys = db.relationship('Key', backref='owner', lazy='dynamic', cascade='all, delete-orphan')
     messages = db.relationship('Message', backref='author', lazy='dynamic', cascade='all, delete-orphan')
     participations = db.relationship('ConversationParticipant', backref='user', lazy='dynamic', cascade='all, delete-orphan')
     read_statuses = db.relationship('MessageReadStatus', backref='user', lazy='dynamic', cascade='all, delete-orphan')
+    sent_friend_requests = db.relationship('FriendRequest', foreign_keys='FriendRequest.sender_id', backref='sender', lazy='dynamic', cascade='all, delete-orphan')
+    received_friend_requests = db.relationship('FriendRequest', foreign_keys='FriendRequest.receiver_id', backref='receiver', lazy='dynamic', cascade='all, delete-orphan')
 
     
     def __repr__(self):
@@ -216,3 +218,64 @@ class MessageReadStatus(db.Model):
             'user_id': self.user_id,
             'read_at': self.read_at.isoformat()
         }
+
+
+class FriendRequest(db.Model):
+    """FriendRequest model - manages friend/chat requests between users."""
+    __tablename__ = 'friend_requests'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    sender_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    receiver_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    
+    # Encrypted conversation keys
+    conversation_key_encrypted_for_receiver = db.Column(db.Text, nullable=False)  # Encrypted with receiver's public key
+    conversation_key_encrypted_for_sender = db.Column(db.Text, nullable=False)  # Encrypted with sender's Master Key
+    
+    # IVs for encryption
+    sender_iv = db.Column(db.String(24), nullable=False)  # 12 bytes = 24 hex chars for AES-GCM
+    receiver_iv = db.Column(db.String(24), nullable=True)  # IV for receiver's encrypted key (set after acceptance)
+    
+    # Signature for verification
+    signature_for_receiver = db.Column(db.Text, nullable=False)  # Signature without sender's key for receiver to verify
+    
+    # Status tracking
+    status = db.Column(db.String(20), nullable=False, default='pending', index=True)  # pending, accepted, rejected
+    
+    # Conversation created after acceptance
+    conversation_id = db.Column(db.Integer, db.ForeignKey('conversations.id'), nullable=True)
+    
+    # Timestamps
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+    
+    # Unique constraint - one pending request per user pair
+    __table_args__ = (
+        db.UniqueConstraint('sender_id', 'receiver_id', 'status', name='unique_pending_request'),
+        db.CheckConstraint("status IN ('pending', 'accepted', 'rejected')", name='valid_status'),
+    )
+    
+    def __repr__(self):
+        return f'<FriendRequest {self.sender_id} -> {self.receiver_id} ({self.status})>'
+    
+    def to_dict(self, include_keys=False):
+        """Convert model to dictionary."""
+        result = {
+            'id': self.id,
+            'sender_id': self.sender_id,
+            'receiver_id': self.receiver_id,
+            'status': self.status,
+            'conversation_id': self.conversation_id,
+            'created_at': self.created_at.isoformat(),
+            'updated_at': self.updated_at.isoformat()
+        }
+        
+        if include_keys:
+            result['conversation_key_encrypted_for_receiver'] = self.conversation_key_encrypted_for_receiver
+            result['conversation_key_encrypted_for_sender'] = self.conversation_key_encrypted_for_sender
+            result['sender_iv'] = self.sender_iv
+            result['receiver_iv'] = self.receiver_iv
+            result['signature_for_receiver'] = self.signature_for_receiver
+        
+        return result
+

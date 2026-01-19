@@ -12,7 +12,7 @@ ph = PasswordHasher()
 
 def validate_email(email):
     """
-    Validate email format.
+    Validate email format using RFC 5322 compliant regex.
     
     Args:
         email: Email string to validate
@@ -22,13 +22,13 @@ def validate_email(email):
     """
     if not email or not isinstance(email, str):
         return False
-    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    pattern = r'^[a-zA-Z0-9.!#$%&\'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$'
     return re.match(pattern, email) is not None
 
 
 def validate_username(username):
     """
-    Validate username: max 24 chars, alphanumeric, underscore, hyphen only.
+    Validate username: max 24 chars, alphanumeric, underscore, hyphen, period.
     
     Args:
         username: Username string to validate
@@ -40,7 +40,7 @@ def validate_username(username):
         return False
     if len(username) > 24:
         return False
-    pattern = r'^[a-zA-Z0-9_-]+$'
+    pattern = r'^[a-zA-Z0-9_.-]+$'
     return re.match(pattern, username) is not None
 
 
@@ -86,17 +86,18 @@ def validate_argon2_hash(password_hash):
 
 def validate_aes_iv(iv_hex):
     """
-    Validate AES IV: must be 16 bytes (32 hex characters).
+    Validate AES-GCM IV: must be 12 bytes (24 hex characters).
+    AES-GCM standard recommends 96-bit (12-byte) IVs.
     
     Args:
         iv_hex: Hexadecimal string representing the IV
         
     Returns:
-        bool: True if valid AES IV
+        bool: True if valid AES-GCM IV
     """
     if not iv_hex or not isinstance(iv_hex, str):
         return False
-    if len(iv_hex) != 32:
+    if len(iv_hex) != 24:  # 12 bytes = 24 hex characters
         return False
     try:
         bytes.fromhex(iv_hex)
@@ -156,9 +157,9 @@ def validate_registration_data(data):
     Returns:
         tuple: (is_valid, error_message)
     """
-    # Check required fields
+    # Check required fields (signature is NOT part of data, it's at request level)
     required_fields = ['username', 'email', 'password_hash', 'encrypted_private_key', 
-                       'public_key', 'encryption_iv', 'signature']
+                       'public_key', 'encryption_iv']
     
     if not data:
         return False, 'No data provided'
@@ -181,7 +182,7 @@ def validate_registration_data(data):
     
     # Validate AES IV
     if not validate_aes_iv(data['encryption_iv']):
-        return False, 'Invalid encryption IV: must be 32 hex characters (16 bytes)'
+        return False, 'Invalid encryption IV: must be 24 hex characters (12 bytes for AES-GCM)'
     
     # Validate Ed25519 public key
     if not validate_ed25519_public_key(data['public_key']):

@@ -1,6 +1,7 @@
 Flask==3.0.0
 Flask-SQLAlchemy==3.1.1
 Flask-Migrate==4.0.5
+Flask-CORS==4.0.0
 python-dotenv==1.0.0
 pycryptodome==3.20.0
 pyotp==2.9.0

@@ -4,8 +4,9 @@ from flask import Blueprint, request, jsonify, session
 from app import db
 from app.models import User
 from app.validators import validate_registration_data
+from app.auth_utils import require_signature, verify_signature
 import json
-import secrets
+import time
 import pyotp
 import qrcode
 import io
@@ -17,10 +18,45 @@ from Crypto.Hash import SHA256
 auth_bp = Blueprint('auth', __name__, url_prefix='/api')
 
 
+@auth_bp.route('/get-encrypted-key', methods=['POST'])
+def get_encrypted_key():
+    """Get encrypted private key for a user by email (no authentication required)."""
+    data = request.get_json()
+    
+    if not data or not data.get('email'):
+        return jsonify({'error': 'Email is required'}), 400
+    
+    user = User.query.filter_by(email=data['email']).first()
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    return jsonify({
+        'encrypted_private_key': user.encrypted_private_key,
+        'encryption_iv': user.encryption_iv
+    }), 200
+
+
 @auth_bp.route('/register', methods=['POST'])
 def register():
-    """Register a new user with zero-knowledge security."""
-    data = request.get_json()
+    request_body = request.get_json()
+    
+    if not request_body:
+        return jsonify({'error': 'No data provided'}), 400
+    
+    # Check for required signature fields
+    if 'signature' not in request_body or 'timestamp' not in request_body or 'data' not in request_body:
+        return jsonify({'error': 'Signature, timestamp, and data are required'}), 400
+    
+    # Validate timestamp (5 minute window)
+    try:
+        timestamp = int(request_body['timestamp'])
+        current_time = int(time.time())
+        if abs(current_time - timestamp) > 300:
+            return jsonify({'error': 'Invalid or expired timestamp'}), 401
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid timestamp format'}), 400
+    
+    data = request_body['data']
     
     # Validate all fields
     is_valid, error_message = validate_registration_data(data)
@@ -35,31 +71,15 @@ def register():
         return jsonify({'error': 'Email already exists'}), 400
     
     # Verify Ed25519 signature
-    try:
-        # Reconstruct data to verify (fields a-e)
-        data_to_verify = {
-            'email': data['email'],
-            'username': data['username'],
-            'password_hash': data['password_hash'],
-            'encrypted_private_key': data['encrypted_private_key'],
-            'public_key': data['public_key'],
-            'encryption_iv': data['encryption_iv']
-        }
-        
-        # Create hash of the data
-        data_string = json.dumps(data_to_verify, sort_keys=True)
-        data_hash = SHA256.new(data_string.encode()).digest()
-        
-        # Load Ed25519 public key
-        public_key_obj = ECC.import_key(data['public_key'])
-        
-        # Verify signature
-        signature_bytes = bytes.fromhex(data['signature'])
-        verifier = eddsa.new(public_key_obj, 'rfc8032')
-        verifier.verify(data_hash, signature_bytes)
-        
-    except (ValueError, TypeError, Exception) as e:
-        return jsonify({'error': f'Invalid signature: {str(e)}'}), 400
+    # For registration, the frontend signs {data: {...}, timestamp: ...}
+    # We need to verify against the exact structure that was signed
+    data_to_verify = {
+        'data': data,
+        'timestamp': request_body['timestamp']
+    }
+    
+    if not verify_signature(data['public_key'], data_to_verify, request_body['signature']):
+        return jsonify({'error': 'Invalid signature'}), 400
     
     # Generate 2FA secret using pyotp
     twofa_secret = pyotp.random_base32()
@@ -79,7 +99,7 @@ def register():
     
     # Convert QR code to base64
     buffer = io.BytesIO()
-    img.save(buffer, format='PNG')
+    img.save(buffer)  # PyPNGImage doesn't accept format argument
     buffer.seek(0)
     qr_code_base64 = base64.b64encode(buffer.getvalue()).decode()
     
@@ -93,6 +113,10 @@ def register():
         'encryption_iv': data['encryption_iv'],
         'twofa_secret': twofa_secret
     }
+    session.modified = True  # Explicitly mark session as modified
+    
+    print(f"[DEBUG] Session created for {data['username']}, session ID: {session.get('_id', 'no-id')}")
+    print(f"[DEBUG] Pending user stored: {session.get('pending_user', {}).get('username', 'none')}")
     
     return jsonify({
         'message': 'Please verify your 2FA code to complete registration',
@@ -105,17 +129,47 @@ def register():
 @auth_bp.route('/register/verify-2fa', methods=['POST'])
 def verify_2fa():
     """Verify 2FA code and complete registration."""
-    data = request.get_json()
+    request_body = request.get_json()
+    
+    if not request_body:
+        return jsonify({'error': 'No data provided'}), 400
+    
+    # Check for required signature fields
+    if 'signature' not in request_body or 'timestamp' not in request_body or 'data' not in request_body:
+        return jsonify({'error': 'Signature, timestamp, and data are required'}), 400
     
     # Check if there's a pending user
+    print(f"[DEBUG] Verify 2FA - Session keys: {list(session.keys())}")
+    print(f"[DEBUG] Verify 2FA - Has pending_user: {'pending_user' in session}")
+    
     if 'pending_user' not in session:
         return jsonify({'error': 'No pending registration found'}), 400
+    
+    # Validate timestamp
+    try:
+        timestamp = int(request_body['timestamp'])
+        current_time = int(time.time())
+        if abs(current_time - timestamp) > 300:
+            return jsonify({'error': 'Invalid or expired timestamp'}), 401
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid timestamp format'}), 400
+    
+    data = request_body['data']
     
     # Validate TOTP code
     if not data or not data.get('totp_code'):
         return jsonify({'error': 'TOTP code is required'}), 400
     
+    # Verify signature using pending user's public key
     pending_user = session['pending_user']
+    data_to_verify = {
+        'data': data,
+        'timestamp': request_body['timestamp']
+    }
+    
+    if not verify_signature(pending_user['public_key'], data_to_verify, request_body['signature']):
+        return jsonify({'error': 'Invalid signature'}), 401
+    
     totp = pyotp.TOTP(pending_user['twofa_secret'])
     
     # Verify the code (with window for time drift)
@@ -155,19 +209,36 @@ def verify_2fa():
 
 @auth_bp.route('/login', methods=['POST'])
 def login():
-    """Login a user with password hash and 2FA code."""
+    """Login a user with email, password hash and 2FA code."""
     data = request.get_json()
     
-    # Validate required fields
-    if not data or not data.get('username') or not data.get('password_hash') or not data.get('totp_code'):
-        return jsonify({'error': 'Username, password_hash, and totp_code are required'}), 400
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
     
-    # Find user
-    user = User.query.filter_by(username=data['username']).first()
+    # Check for email or username
+    email = data.get('email')
+    username = data.get('username')
+    
+    if not email and not username:
+        return jsonify({'error': 'Email or username is required'}), 400
+    
+    # Validate required fields
+    if not data.get('password_hash') or not data.get('totp_code'):
+        return jsonify({'error': 'Password_hash and totp_code are required'}), 400
+    
+    # Get user by email or username
+    if email:
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            return jsonify({'error': 'Invalid email or password'}), 401
+    else:
+        user = User.query.filter_by(username=username).first()
+        if not user:
+            return jsonify({'error': 'Invalid username or password'}), 401
     
     # Compare password hashes directly
-    if not user or user.password_hash != data['password_hash']:
-        return jsonify({'error': 'Invalid username or password'}), 401
+    if user.password_hash != data['password_hash']:
+        return jsonify({'error': 'Invalid password'}), 401
     
     # Verify 2FA code
     totp = pyotp.TOTP(user.twofa_secret)
@@ -192,22 +263,19 @@ def login():
 
 
 @auth_bp.route('/logout', methods=['POST'])
+@require_signature
 def logout():
     """Logout the current user."""
     session.clear()
     return jsonify({'message': 'Logout successful'}), 200
 
 
-@auth_bp.route('/me', methods=['GET'])
+@auth_bp.route('/me', methods=['POST'])
+@require_signature
 def me():
     """Get current logged-in user."""
-    if 'user_id' not in session:
-        return jsonify({'error': 'Not authenticated'}), 401
-    
+    # User already verified by decorator
     user = User.query.get(session['user_id'])
-    if not user:
-        session.clear()
-        return jsonify({'error': 'User not found'}), 404
     
     return jsonify({
         'id': user.id,
