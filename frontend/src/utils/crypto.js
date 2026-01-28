@@ -3,15 +3,35 @@
  * Implements Ed25519 signatures, AES encryption, and Argon2 password hashing
  */
 
-import { ed25519 } from '@noble/curves/ed25519';
+import { ed25519, x25519 } from '@noble/curves/ed25519';
 import { sha256 } from '@noble/hashes/sha256';
-
+import sodium from 'libsodium-wrappers';
 /**
  * Generate Ed25519 key pair
  * @returns {Promise<{privateKey: Uint8Array, publicKey: Uint8Array, publicKeyPEM: string}>}
  */
+
+/**
+ * Convert Ed25519 public key → X25519 public key
+ */
+export async function ed25519PublicKeyToX25519(edPublicKey) {
+  await sodium.ready;
+  return sodium.crypto_sign_ed25519_pk_to_curve25519(edPublicKey);
+}
+
+/**
+ * Convert Ed25519 private key → X25519 private key
+ */
+export async function ed25519PrivateKeyToX25519(edPrivateKey) {
+  await sodium.ready;
+  const edKeypair = sodium.crypto_sign_seed_keypair(edPrivateKey)
+
+  return sodium.crypto_sign_ed25519_sk_to_curve25519(edKeypair.privateKey);
+}
+
+
 export async function generateKeyPair() {
-  const privateKey = ed25519.utils.randomPrivateKey();
+  const privateKey = ed25519.utils.randomSecretKey();
   const publicKey = ed25519.getPublicKey(privateKey);
   
   // Convert public key to PEM format
@@ -36,7 +56,7 @@ export async function exportPublicKeyToPEM(publicKey) {
   keyWithOID.set(oid);
   keyWithOID.set(publicKey, oid.length);
   
-  const base64 = btoa(String.fromCharCode(...keyWithOID));
+  const base64 = btoa(String.fromCharCode(...keyWithOID));32
   const pem = `-----BEGIN PUBLIC KEY-----\n${base64.match(/.{1,64}/g).join('\n')}\n-----END PUBLIC KEY-----`;
   
   return pem;
@@ -362,106 +382,86 @@ export function importPublicKeyFromPEM(pem) {
  * @returns {Promise<string>} Base64-encoded encrypted data with ephemeral public key
  */
 export async function encryptWithPublicKey(data, recipientPublicKeyPEM) {
-  // Import recipient's public key
-  const recipientPublicKey = importPublicKeyFromPEM(recipientPublicKeyPEM);
-  
-  // Generate ephemeral ECDH key pair (we'll use the subtle crypto API)
-  const ephemeralKeyPair = await crypto.subtle.generateKey(
-    {
-      name: 'ECDH',
-      namedCurve: 'P-256'  // Using P-256 for compatibility
-    },
-    true,
-    ['deriveKey']
+  // 1. Import Ed25519 public key
+  const edPublicKey = importPublicKeyFromPEM(recipientPublicKeyPEM);
+
+  // 2. Convert → X25519
+  const x25519PublicKey = await ed25519PublicKeyToX25519(edPublicKey);
+
+  // 3. Generate ephemeral X25519 keypair
+  const ephemeralPrivate = x25519.utils.randomSecretKey();
+  const ephemeralPublic = x25519.getPublicKey(ephemeralPrivate);
+
+  // 4. ECDH
+  const sharedSecret = x25519.getSharedSecret(
+    ephemeralPrivate,
+    x25519PublicKey
   );
-  
-  // Export ephemeral public key
-  const ephemeralPublicKeyRaw = await crypto.subtle.exportKey('raw', ephemeralKeyPair.publicKey);
-  
-  // For Ed25519 to X25519 conversion and ECDH, we need to use a compatible approach
-  // Since we're using Ed25519 for signatures, let's use a simpler hybrid approach:
-  // Generate random AES key, encrypt it with a derived key from hash(recipientPublicKey + ephemeralPrivateKey)
-  
-  // For now, we'll use a simplified approach with AES-GCM and a derived key
-  const ephemeralPrivateKeyBytes = crypto.getRandomValues(new Uint8Array(32));
-  
-  // Derive shared secret by hashing both keys together
-  const combined = new Uint8Array(recipientPublicKey.length + ephemeralPrivateKeyBytes.length);
-  combined.set(recipientPublicKey);
-  combined.set(ephemeralPrivateKeyBytes, recipientPublicKey.length);
-  const sharedSecret = sha256(combined);
-  
-  // Import as AES key
+
+  // 5. Derive AES key (hash shared secret)
+  const aesKeyMaterial = sha256(sharedSecret);
   const aesKey = await crypto.subtle.importKey(
     'raw',
-    sharedSecret,
+    aesKeyMaterial,
     { name: 'AES-GCM', length: 256 },
     false,
     ['encrypt']
   );
-  
-  // Generate IV
+
+  // 6. Encrypt
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  
-  // Encrypt data
   const encrypted = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: iv },
+    { name: 'AES-GCM', iv },
     aesKey,
     data
   );
-  
-  // Combine: ephemeralPrivateKeyBytes + iv + encrypted
-  const result = new Uint8Array(ephemeralPrivateKeyBytes.length + iv.length + encrypted.byteLength);
-  result.set(ephemeralPrivateKeyBytes, 0);
-  result.set(iv, ephemeralPrivateKeyBytes.length);
-  result.set(new Uint8Array(encrypted), ephemeralPrivateKeyBytes.length + iv.length);
-  
-  // Return as base64
-  return btoa(String.fromCharCode(...result));
+
+  // 7. Pack: [ephemeralPub || iv || ciphertext]
+  const out = new Uint8Array(
+    ephemeralPublic.length + iv.length + encrypted.byteLength
+  );
+  out.set(ephemeralPublic, 0);
+  out.set(iv, 32);
+  out.set(new Uint8Array(encrypted), 44);
+
+  return btoa(String.fromCharCode(...out));
 }
 
-/**
- * Decrypt data using own Ed25519 private key
- * @param {string} encryptedBase64 - Base64-encoded encrypted data
- * @param {Uint8Array} privateKey - Own Ed25519 private key
- * @returns {Promise<Uint8Array>} Decrypted data
- */
-export async function decryptWithPrivateKey(encryptedBase64, privateKey) {
-  // Decode from base64
-  const combined = new Uint8Array(
-    atob(encryptedBase64).split('').map(c => c.charCodeAt(0))
+export async function decryptWithPrivateKey(encryptedBase64, edPrivateKey) {
+  // 1. Decode
+  const bytes = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
+
+  // 2. Split
+  const ephemeralPublic = bytes.slice(0, 32);
+  const iv = bytes.slice(32, 44);
+  const ciphertext = bytes.slice(44);
+
+  // 3. Convert private key → X25519
+  const x25519PrivateKey = await ed25519PrivateKeyToX25519(edPrivateKey);
+
+  // 4. ECDH
+  const sharedSecret = x25519.getSharedSecret(
+    x25519PrivateKey,
+    ephemeralPublic
   );
-  
-  // Extract parts
-  const ephemeralKey = combined.slice(0, 32);
-  const iv = combined.slice(32, 44);
-  const encrypted = combined.slice(44);
-  
-  // Get our public key from private key
-  const ourPublicKey = ed25519.getPublicKey(privateKey);
-  
-  // Derive shared secret
-  const combinedKeys = new Uint8Array(ourPublicKey.length + ephemeralKey.length);
-  combinedKeys.set(ourPublicKey);
-  combinedKeys.set(ephemeralKey, ourPublicKey.length);
-  const sharedSecret = sha256(combinedKeys);
-  
-  // Import as AES key
+
+  // 5. Derive AES key
+  const aesKeyMaterial = sha256(sharedSecret);
   const aesKey = await crypto.subtle.importKey(
     'raw',
-    sharedSecret,
+    aesKeyMaterial,
     { name: 'AES-GCM', length: 256 },
     false,
     ['decrypt']
   );
-  
-  // Decrypt
+
+  // 6. Decrypt
   const decrypted = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: iv },
+    { name: 'AES-GCM', iv },
     aesKey,
-    encrypted
+    ciphertext
   );
-  
+
   return new Uint8Array(decrypted);
 }
 
