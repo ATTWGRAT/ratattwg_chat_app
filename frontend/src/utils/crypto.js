@@ -61,27 +61,6 @@ export async function exportPrivateKeyToPEM(privateKey) {
 }
 
 /**
- * Import PEM formatted private key to Uint8Array
- * @param {string} pem 
- * @returns {Uint8Array}
- */
-export function importPrivateKeyFromPEM(pem) {
-  const base64 = pem
-    .replace(/-----BEGIN PRIVATE KEY-----/, '')
-    .replace(/-----END PRIVATE KEY-----/, '')
-    .replace(/\s/g, '');
-  
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  
-  // Extract the actual private key (last 32 bytes)
-  return bytes.slice(-32);
-}
-
-/**
  * Generate Master Key using PBKDF2
  * @param {string} password - Plain text password (payload)
  * @param {string} email - Email address (salt)
@@ -535,4 +514,183 @@ export async function encryptConversationKey(conversationKey, masterKey) {
  */
 export function createSignatureForReceiver(privateKey, data) {
   return signData(privateKey, data);
+}
+
+
+// ============================================================================
+// MESSAGE ENCRYPTION FUNCTIONS
+// ============================================================================
+
+/**
+ * Generate a unique nonce for message encryption (timestamp + random bytes)
+ * @returns {Uint8Array} 24-byte nonce
+ */
+export function generateMessageNonce() {
+  // Use timestamp (8 bytes) + random (16 bytes) = 24 bytes for AES-GCM
+  const timestamp = BigInt(Date.now());
+  const timestampBytes = new Uint8Array(8);
+  for (let i = 0; i < 8; i++) {
+    timestampBytes[i] = Number((timestamp >> BigInt(8 * i)) & BigInt(0xff));
+  }
+  
+  const randomBytes = crypto.getRandomValues(new Uint8Array(16));
+  
+  const nonce = new Uint8Array(24);
+  nonce.set(timestampBytes, 0);
+  nonce.set(randomBytes, 8);
+  
+  return nonce;
+}
+
+/**
+ * Encrypt a message with AES-GCM using conversation key
+ * @param {string} message - Plain text message
+ * @param {Uint8Array} conversationKey - 32-byte AES key
+ * @param {Uint8Array} nonce - 24-byte nonce
+ * @returns {Promise<string>} Base64 encoded ciphertext
+ */
+export async function encryptMessage(message, conversationKey, nonce) {
+  const encoder = new TextEncoder();
+  const messageBytes = encoder.encode(message);
+  
+  // Import key for AES-GCM
+  const key = await crypto.subtle.importKey(
+    'raw',
+    conversationKey,
+    { name: 'AES-GCM' },
+    false,
+    ['encrypt']
+  );
+  
+  // Use first 12 bytes of nonce for AES-GCM IV
+  const iv = nonce.slice(0, 12);
+  
+  // Encrypt
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    messageBytes
+  );
+  
+  return btoa(String.fromCharCode(...new Uint8Array(ciphertext)));
+}
+
+/**
+ * Decrypt a message with AES-GCM
+ * @param {string} encryptedMessage - Base64 encoded ciphertext
+ * @param {Uint8Array} conversationKey - 32-byte AES key
+ * @param {Uint8Array} nonce - 24-byte nonce
+ * @returns {Promise<string>} Decrypted plain text
+ */
+export async function decryptMessage(encryptedMessage, conversationKey, nonce) {
+  const ciphertext = Uint8Array.from(atob(encryptedMessage), c => c.charCodeAt(0));
+  
+  // Import key for AES-GCM
+  const key = await crypto.subtle.importKey(
+    'raw',
+    conversationKey,
+    { name: 'AES-GCM' },
+    false,
+    ['decrypt']
+  );
+  
+  // Use first 12 bytes of nonce for AES-GCM IV
+  const iv = nonce.slice(0, 12);
+  
+  // Decrypt
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    ciphertext
+  );
+  
+  const decoder = new TextDecoder();
+  return decoder.decode(decrypted);
+}
+
+/**
+ * Sign a message for verification
+ * @param {Uint8Array} privateKey - Sender's Ed25519 private key
+ * @param {Object} messageData - {encrypted_content, nonce, conversation_id}
+ * @returns {string} Hex encoded signature
+ */
+export function signMessage(privateKey, messageData) {
+  return signData(privateKey, messageData);
+}
+
+/**
+ * Verify message signature
+ * @param {string} publicKeyPEM - Sender's public key in PEM format
+ * @param {Object} messageData - {encrypted_content, nonce, conversation_id}
+ * @param {string} signatureHex - Hex encoded signature
+ * @returns {boolean} True if signature is valid
+ */
+export function verifyMessageSignature(publicKeyPEM, messageData, signatureHex) {
+  const publicKeyBytes = importPublicKeyFromPEM(publicKeyPEM);
+  return verifySignature(publicKeyBytes, messageData, signatureHex);
+}
+
+/**
+ * Encrypt a file with AES-GCM
+ * @param {ArrayBuffer} fileData - Raw file data
+ * @param {Uint8Array} conversationKey - 32-byte AES key
+ * @param {Uint8Array} nonce - 24-byte nonce (different from message nonce)
+ * @returns {Promise<string>} Base64 encoded encrypted file
+ */
+export async function encryptFile(fileData, conversationKey, nonce) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    conversationKey,
+    { name: 'AES-GCM' },
+    false,
+    ['encrypt']
+  );
+  
+  const iv = nonce.slice(0, 12);
+  
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    fileData
+  );
+  
+  return btoa(String.fromCharCode(...new Uint8Array(encrypted)));
+}
+
+/**
+ * Decrypt a file with AES-GCM
+ * @param {string} encryptedData - Base64 encoded encrypted file
+ * @param {Uint8Array} conversationKey - 32-byte AES key
+ * @param {Uint8Array} nonce - 24-byte nonce
+ * @returns {Promise<ArrayBuffer>} Decrypted file data
+ */
+export async function decryptFile(encryptedData, conversationKey, nonce) {
+  const ciphertext = Uint8Array.from(atob(encryptedData), c => c.charCodeAt(0));
+  
+  const key = await crypto.subtle.importKey(
+    'raw',
+    conversationKey,
+    { name: 'AES-GCM' },
+    false,
+    ['decrypt']
+  );
+  
+  const iv = nonce.slice(0, 12);
+  
+  return await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    ciphertext
+  );
+}
+
+/**
+ * Decrypt conversation key with Master Key
+ * @param {string} encryptedHex - Encrypted conversation key in hex
+ * @param {string} ivHex - IV in hex
+ * @param {Uint8Array} masterKey - Master key for decryption
+ * @returns {Promise<Uint8Array>} Decrypted 32-byte conversation key
+ */
+export async function decryptConversationKey(encryptedHex, ivHex, masterKey) {
+  return await decryptPrivateKey(encryptedHex, ivHex, masterKey);
 }

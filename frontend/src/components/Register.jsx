@@ -2,108 +2,126 @@
  * Registration component with Ed25519 key generation
  */
 
-import { useState } from 'react';
+import { useCallback, useMemo } from 'react';
 import { generateKeyPair, generateMasterKey, hashPassword, encryptPrivateKey } from '../utils/crypto';
 import { register } from '../utils/api';
+import { useForm } from '../hooks/useForm';
+import { useAsync } from '../hooks/useAsync';
+import { Button } from './ui/Button';
+import { Input } from './ui/Input';
+import { Alert } from './ui/Alert';
+
+// Validation utility functions
+const validateUsername = (username) => {
+  const usernameRegex = /^[a-zA-Z0-9_.-]+$/;
+  if (!username || username.length < 3 || username.length > 24) {
+    return 'Username must be between 3 and 24 characters';
+  }
+  if (!usernameRegex.test(username)) {
+    return 'Username can only contain letters, numbers, underscores, hyphens, and periods';
+  }
+  return null;
+};
+
+const validateEmail = (email) => {
+  const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+  if (!email || !emailRegex.test(email)) {
+    return 'Please enter a valid email address';
+  }
+  return null;
+};
+
+const validatePassword = (password) => {
+  if (!password || password.length < 8) {
+    return 'Password must be at least 8 characters';
+  }
+  if (password.length > 128) {
+    return 'Password must be less than 128 characters';
+  }
+  if (!/[a-z]/.test(password)) {
+    return 'Password must contain at least one lowercase letter';
+  }
+  if (!/[A-Z]/.test(password)) {
+    return 'Password must contain at least one uppercase letter';
+  }
+  if (!/[0-9]/.test(password)) {
+    return 'Password must contain at least one number';
+  }
+  if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password)) {
+    return 'Password must contain at least one special character';
+  }
+  return null;
+};
 
 export default function Register({ onSuccess, onSwitchToLogin }) {
-  const [formData, setFormData] = useState({
+  const { values, errors, handleChange, setFieldError, resetForm } = useForm({
     username: '',
     email: '',
     password: '',
     confirmPassword: ''
   });
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const { loading, error, execute, clearError } = useAsync();
 
-  const handleChange = (e) => {
-    setFormData({
-      ...formData,
-      [e.target.name]: e.target.value
-    });
-    setError('');
-  };
+  const handleInputChange = useCallback((e) => {
+    handleChange(e);
+    clearError();
+  }, [handleChange, clearError]);
 
-  const validateForm = () => {
-    // Username validation: alphanumeric and simple symbols only
-    const usernameRegex = /^[a-zA-Z0-9_.-]+$/;
-    if (!formData.username || formData.username.length < 3 || formData.username.length > 24) {
-      setError('Username must be between 3 and 24 characters');
-      return false;
-    }
-    if (!usernameRegex.test(formData.username)) {
-      setError('Username can only contain letters, numbers, underscores, hyphens, and periods');
+  const validateForm = useCallback(() => {
+    // Username validation
+    const usernameError = validateUsername(values.username);
+    if (usernameError) {
+      setFieldError('username', usernameError);
       return false;
     }
 
-    // Email validation: strict RFC 5322 compliant regex
-    const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
-    if (!formData.email || !emailRegex.test(formData.email)) {
-      setError('Please enter a valid email address');
+    // Email validation
+    const emailError = validateEmail(values.email);
+    if (emailError) {
+      setFieldError('email', emailError);
       return false;
     }
 
-    // Password validation: comprehensive strength checks
-    if (!formData.password || formData.password.length < 8) {
-      setError('Password must be at least 8 characters');
-      return false;
-    }
-    if (formData.password.length > 128) {
-      setError('Password must be less than 128 characters');
-      return false;
-    }
-    if (!/[a-z]/.test(formData.password)) {
-      setError('Password must contain at least one lowercase letter');
-      return false;
-    }
-    if (!/[A-Z]/.test(formData.password)) {
-      setError('Password must contain at least one uppercase letter');
-      return false;
-    }
-    if (!/[0-9]/.test(formData.password)) {
-      setError('Password must contain at least one number');
-      return false;
-    }
-    if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(formData.password)) {
-      setError('Password must contain at least one special character');
+    // Password validation
+    const passwordError = validatePassword(values.password);
+    if (passwordError) {
+      setFieldError('password', passwordError);
       return false;
     }
 
-    if (formData.password !== formData.confirmPassword) {
-      setError('Passwords do not match');
+    // Confirm password validation
+    if (values.password !== values.confirmPassword) {
+      setFieldError('confirmPassword', 'Passwords do not match');
       return false;
     }
 
     return true;
-  };
+  }, [values, setFieldError]);
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = useCallback(async (e) => {
     e.preventDefault();
     
     if (!validateForm()) {
       return;
     }
 
-    setLoading(true);
-    setError('');
-
-    try {
+    await execute(async () => {
       // 1. Generate Ed25519 key pair
       const { privateKey, publicKeyPEM } = await generateKeyPair();
 
       // 2. Generate Master Key: PBKDF2(password, email)
-      const masterKey = await generateMasterKey(formData.password, formData.email);
+      const masterKey = await generateMasterKey(values.password, values.email);
 
       // 3. Hash password with Argon2id: Argon2ID(masterKey, password)
-      const passwordHash = await hashPassword(masterKey, formData.password);
+      const passwordHash = await hashPassword(masterKey, values.password);
 
       // 4. Encrypt private key with Master Key and time-based IV
       const { encrypted, iv } = await encryptPrivateKey(privateKey, masterKey);
 
       // 5. Prepare registration data
       const registrationData = {
-        username: formData.username,
-        email: formData.email,
+        username: values.username,
+        email: values.email,
         password_hash: passwordHash,
         encrypted_private_key: encrypted,
         public_key: publicKeyPEM,
@@ -118,18 +136,12 @@ export default function Register({ onSuccess, onSwitchToLogin }) {
         ...response,
         privateKey: privateKey,
         masterKey: masterKey,
-        username: formData.username,
-        email: formData.email,
-        password: formData.password
+        username: values.username,
+        email: values.email,
+        password: values.password
       });
-
-    } catch (error) {
-      console.error('Registration error:', error);
-      setError(error.message || 'Registration failed. Please try again.');
-    } finally {
-      setLoading(false);
-    }
-  };
+    });
+  }, [values, validateForm, execute, onSuccess]);
 
   return (
     <div className="w-full max-w-md">
@@ -145,103 +157,75 @@ export default function Register({ onSuccess, onSwitchToLogin }) {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">
-          <div>
-            <label htmlFor="username" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Username
-            </label>
-            <input
-              type="text"
-              id="username"
-              name="username"
-              value={formData.username}
-              onChange={handleChange}
-              required
-              minLength={3}
-              maxLength={24}
-              className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 transition-all"
-              placeholder="Choose a username"
-              disabled={loading}
-            />
-          </div>
+          <Input
+            type="text"
+            id="username"
+            name="username"
+            label="Username"
+            value={values.username}
+            onChange={handleInputChange}
+            error={errors.username}
+            minLength={3}
+            maxLength={24}
+            placeholder="Choose a username"
+            disabled={loading}
+            required
+          />
 
-          <div>
-            <label htmlFor="email" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Email Address
-            </label>
-            <input
-              type="email"
-              id="email"
-              name="email"
-              value={formData.email}
-              onChange={handleChange}
-              required
-              className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 transition-all"
-              placeholder="your@email.com"
-              disabled={loading}
-            />
-          </div>
+          <Input
+            type="email"
+            id="email"
+            name="email"
+            label="Email Address"
+            value={values.email}
+            onChange={handleInputChange}
+            error={errors.email}
+            placeholder="your@email.com"
+            disabled={loading}
+            required
+          />
 
-          <div>
-            <label htmlFor="password" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Password
-            </label>
-            <input
-              type="password"
-              id="password"
-              name="password"
-              value={formData.password}
-              onChange={handleChange}
-              required
-              minLength={8}
-              className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 transition-all"
-              placeholder="At least 8 characters"
-              disabled={loading}
-            />
-            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Must contain: uppercase, lowercase, number, and special character
-            </p>
-          </div>
+          <Input
+            type="password"
+            id="password"
+            name="password"
+            label="Password"
+            value={values.password}
+            onChange={handleInputChange}
+            error={errors.password}
+            minLength={8}
+            placeholder="At least 8 characters"
+            helpText="Must contain: uppercase, lowercase, number, and special character"
+            disabled={loading}
+            required
+          />
 
-          <div>
-            <label htmlFor="confirmPassword" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Confirm Password
-            </label>
-            <input
-              type="password"
-              id="confirmPassword"
-              name="confirmPassword"
-              value={formData.confirmPassword}
-              onChange={handleChange}
-              required
-              className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 transition-all"
-              placeholder="Confirm your password"
-              disabled={loading}
-            />
-          </div>
+          <Input
+            type="password"
+            id="confirmPassword"
+            name="confirmPassword"
+            label="Confirm Password"
+            value={values.confirmPassword}
+            onChange={handleInputChange}
+            error={errors.confirmPassword}
+            placeholder="Confirm your password"
+            disabled={loading}
+            required
+          />
 
           {error && (
-            <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
-              <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
-            </div>
+            <Alert type="error" message={error} onClose={clearError} />
           )}
 
-          <button
+          <Button
             type="submit"
+            variant="primary"
             disabled={loading}
-            className="w-full py-3 px-4 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-semibold rounded-lg shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+            loading={loading}
+            fullWidth
           >
-            {loading ? (
-              <span className="flex items-center justify-center">
-                <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                Creating Account...
-              </span>
-            ) : (
-              'Create Account'
-            )}
-          </button>
+            Create Account
+          </Button>
         </form>
 
         <div className="mt-6 text-center">

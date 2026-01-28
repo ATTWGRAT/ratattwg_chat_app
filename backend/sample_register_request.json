@@ -1,9 +1,0 @@
-{
-  "email": "user@example.com",
-  "username": "john_doe",
-  "password_hash": "4f8a9b2e1c3d5e7f8a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f",
-  "encrypted_private_key": "AJw8KqN9xLm3yH7zRpE4vF8nB2dQ6sT1cV5gY9hM0kL3pW4xZ7eA8uI2oN6rC1tX5bS9jK4mE8nD3vL7fG2hT6wQ==",
-  "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=\n-----END PUBLIC KEY-----",
-  "encryption_iv": "a3d5f1c8b2e4a7d9c1b8e5f2",
-  "signature": "3c8f9a2b1d4e5a6c7b8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
-}

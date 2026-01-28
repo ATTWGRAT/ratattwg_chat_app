@@ -1,0 +1,30 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: secure-chat-app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Mount SSL certificates (replace with your actual certificates)
+      - ./docker/ssl:/etc/nginx/ssl:ro,z
+      # Mount database to persist data
+      - ./data/instance:/app/backend/instance:z
+    environment:
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+      - FLASK_ENV=production
+      - DATABASE_URL=sqlite:////app/backend/instance/app.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  instance:
+  logs:
+  nginx-logs:

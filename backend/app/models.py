@@ -15,6 +15,8 @@ class User(db.Model):
     encrypted_private_key = db.Column(db.Text, nullable=False)
     public_key = db.Column(db.Text, nullable=False)
     encryption_iv = db.Column(db.String(24), nullable=False)  # 12 bytes = 24 hex chars for AES-GCM
+    recovery_codes = db.Column(db.Text, nullable=True)  # JSON array of hashed recovery codes
+    requires_2fa_reset = db.Column(db.Boolean, default=False, nullable=False)  # Flag for forcing 2FA reset after recovery code use
     
     # Relationships
     keys = db.relationship('Key', backref='owner', lazy='dynamic', cascade='all, delete-orphan')
@@ -72,8 +74,8 @@ class ConversationParticipant(db.Model):
     __tablename__ = 'conversation_participants'
     
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    conversation_id = db.Column(db.Integer, db.ForeignKey('conversations.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    conversation_id = db.Column(db.Integer, db.ForeignKey('conversations.id'), nullable=False, index=True)
     joined_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
     
     # Unique constraint to prevent duplicate participations
@@ -93,20 +95,25 @@ class ConversationParticipant(db.Model):
 
 
 class Message(db.Model):
-    """Message model - stores individual messages in conversations."""
+    """Message model - stores individual encrypted messages in conversations."""
     __tablename__ = 'messages'
     
     id = db.Column(db.Integer, primary_key=True)
-    content = db.Column(db.Text, nullable=False)
+    encrypted_content = db.Column(db.Text, nullable=False)  # AES-GCM encrypted message
+    nonce = db.Column(db.String(48), nullable=False, index=True)  # 24 bytes = 48 hex chars for AES-GCM
+    signature = db.Column(db.Text, nullable=False)  # Ed25519 signature for verification
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
     
     # Foreign keys
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    conversation_id = db.Column(db.Integer, db.ForeignKey('conversations.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    conversation_id = db.Column(db.Integer, db.ForeignKey('conversations.id'), nullable=False, index=True)
     
     # Relationships
     files = db.relationship('File', backref='message', lazy='dynamic', cascade='all, delete-orphan')
     read_statuses = db.relationship('MessageReadStatus', backref='message', lazy='dynamic', cascade='all, delete-orphan')
+    
+    # Unique constraint for nonce per conversation to prevent replay attacks
+    __table_args__ = (db.UniqueConstraint('conversation_id', 'nonce', name='unique_conversation_nonce'),)
     
     def __repr__(self):
         return f'<Message {self.id} from user {self.user_id}>'
@@ -115,11 +122,18 @@ class Message(db.Model):
         """Convert model to dictionary."""
         result = {
             'id': self.id,
-            'content': self.content,
+            'encrypted_content': self.encrypted_content,
+            'nonce': self.nonce,
+            'signature': self.signature,
             'user_id': self.user_id,
             'conversation_id': self.conversation_id,
             'created_at': self.created_at.isoformat(),
-            'file_count': self.files.count()
+            'file_count': self.files.count(),
+            'sender': {
+                'id': self.author.id,
+                'username': self.author.username,
+                'public_key': self.author.public_key
+            }
         }
         
         if include_read_status:
@@ -138,8 +152,8 @@ class Key(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
     
     # Foreign keys
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    conversation_id = db.Column(db.Integer, db.ForeignKey('conversations.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    conversation_id = db.Column(db.Integer, db.ForeignKey('conversations.id'), nullable=False, index=True)
     
     # Unique constraint - each user gets one key per conversation
     __table_args__ = (db.UniqueConstraint('user_id', 'conversation_id', name='unique_user_conversation_key'),)
@@ -164,8 +178,10 @@ class File(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     filename = db.Column(db.String(255), nullable=False)
-    encrypted_data = db.Column(db.LargeBinary, nullable=False)  # Encrypted file content
-    file_size = db.Column(db.Integer, nullable=False)  # Size in bytes
+    encrypted_data = db.Column(db.LargeBinary, nullable=False)  # Encrypted file content (AES-GCM)
+    nonce = db.Column(db.String(48), nullable=False)  # 24 bytes = 48 hex chars for AES-GCM (unique per file)
+    file_size = db.Column(db.Integer, nullable=False)  # Size in bytes (encrypted size)
+    original_size = db.Column(db.Integer, nullable=False)  # Original file size before encryption
     mime_type = db.Column(db.String(100), nullable=True)  # e.g., 'image/png', 'application/pdf'
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
     
@@ -180,7 +196,9 @@ class File(db.Model):
         result = {
             'id': self.id,
             'filename': self.filename,
+            'nonce': self.nonce,
             'file_size': self.file_size,
+            'original_size': self.original_size,
             'mime_type': self.mime_type,
             'message_id': self.message_id,
             'created_at': self.created_at.isoformat()
@@ -188,7 +206,8 @@ class File(db.Model):
         
         # Only include encrypted data if explicitly requested
         if include_data:
-            result['encrypted_data'] = self.encrypted_data.decode('latin-1') if self.encrypted_data else None
+            import base64
+            result['encrypted_data'] = base64.b64encode(self.encrypted_data).decode('utf-8') if self.encrypted_data else None
         
         return result
 
@@ -225,8 +244,8 @@ class FriendRequest(db.Model):
     __tablename__ = 'friend_requests'
     
     id = db.Column(db.Integer, primary_key=True)
-    sender_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    receiver_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    sender_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    receiver_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
     
     # Encrypted conversation keys
     conversation_key_encrypted_for_receiver = db.Column(db.Text, nullable=False)  # Encrypted with receiver's public key

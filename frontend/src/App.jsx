@@ -2,16 +2,25 @@ import { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Register from './components/Register';
 import Login from './components/Login';
+import RecoveryLogin from './components/RecoveryLogin';
 import TwoFAVerification from './components/TwoFAVerification';
+import TwoFAReset from './components/TwoFAReset';
 import Chat from './components/Chat';
 
-console.log('App.jsx loaded');
-
 function AppContent() {
-  console.log('AppContent rendering');
-  const { isAuthenticated, loading } = useAuth();
-  const [view, setView] = useState('login'); // 'login', 'register', '2fa'
+  const { isAuthenticated, loading, user } = useAuth();
+  const [view, setView] = useState('login'); // 'login', 'register', '2fa', 'recovery'
   const [registrationData, setRegistrationData] = useState(null);
+  const [showResetFlow, setShowResetFlow] = useState(false);
+
+  // Check if user needs to reset 2FA
+  useEffect(() => {
+    if (isAuthenticated && user && user.requires_2fa_reset) {
+      setShowResetFlow(true);
+    } else {
+      setShowResetFlow(false);
+    }
+  }, [isAuthenticated, user]);
 
   // Reset to login view when user logs out
   useEffect(() => {
@@ -31,6 +40,12 @@ function AppContent() {
     setView('register');
   };
 
+  const handleResetComplete = () => {
+    setShowResetFlow(false);
+    // Refresh the page to reload user data
+    window.location.reload();
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 via-purple-50 to-pink-50 dark:from-gray-900 dark:via-gray-800 dark:to-gray-900 flex items-center justify-center">
@@ -46,6 +61,10 @@ function AppContent() {
   }
 
   if (isAuthenticated) {
+    // If user needs to reset 2FA, show reset flow instead of chat
+    if (showResetFlow) {
+      return <TwoFAReset onResetComplete={handleResetComplete} />;
+    }
     return <Chat />;
   }
 
@@ -70,13 +89,22 @@ function AppContent() {
         {/* Main Content */}
         <div className="flex justify-center">
           {view === 'login' && (
-            <Login onSwitchToRegister={() => setView('register')} />
+            <Login 
+              onSwitchToRegister={() => setView('register')}
+              onSwitchToRecovery={() => setView('recovery')}
+            />
           )}
           
           {view === 'register' && (
             <Register 
               onSuccess={handleRegistrationSuccess}
               onSwitchToLogin={() => setView('login')}
+            />
+          )}
+          
+          {view === 'recovery' && (
+            <RecoveryLogin 
+              onBackToLogin={() => setView('login')}
             />
           )}
           

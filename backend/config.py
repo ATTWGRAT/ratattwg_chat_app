@@ -20,11 +20,19 @@ class Config:
     # CORS settings (for React frontend)
     CORS_ORIGINS = [
         'http://localhost:3000', 
-        'http://localhost:5173'
+        'http://localhost:5173',
+        'https://localhost',  # Docker Nginx production
+        'http://localhost'    # Docker Nginx HTTP redirect
     ]
     
     # Signature settings
     SIGNATURE_MAX_AGE = 300  # 5 minutes for timestamp validation
+    
+    # Logging settings
+    LOG_LEVEL = 'INFO'
+    LOG_TO_FILE = True
+    LOG_FILE = 'app.log'
+    LOG_DIR = os.path.join(basedir, 'logs')
     
     # Application settings
     DEBUG = False
@@ -34,6 +42,7 @@ class Config:
 class DevelopmentConfig(Config):
     """Development configuration."""
     DEBUG = True
+    LOG_LEVEL = 'DEBUG'  # More verbose logging in development
 
 
 class ProductionConfig(Config):

@@ -11,6 +11,8 @@ export default function TwoFAVerification({ registrationData, onBack }) {
   const [totpCode, setTotpCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [showRecoveryCodes, setShowRecoveryCodes] = useState(true);
+  const [recoveryCodesCopied, setRecoveryCodesCopied] = useState(false);
   const { completeRegistration } = useAuth();
 
   const handleSubmit = async (e) => {
@@ -43,6 +45,27 @@ export default function TwoFAVerification({ registrationData, onBack }) {
     const value = e.target.value.replace(/\D/g, '').slice(0, 6);
     setTotpCode(value);
     setError('');
+  };
+
+  const copyRecoveryCodes = () => {
+    const codes = registrationData.recovery_codes.join('\n');
+    navigator.clipboard.writeText(codes).then(() => {
+      setRecoveryCodesCopied(true);
+      setTimeout(() => setRecoveryCodesCopied(false), 3000);
+    });
+  };
+
+  const downloadRecoveryCodes = () => {
+    const codes = registrationData.recovery_codes.join('\n');
+    const blob = new Blob([`Secure Chat - Recovery Codes\n\nGenerated: ${new Date().toLocaleString()}\n\nIMPORTANT: Store these codes in a secure location.\nEach code can only be used once.\n\n${codes}\n\n⚠️ Keep these codes secret and secure!`], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'secure-chat-recovery-codes.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -90,6 +113,92 @@ export default function TwoFAVerification({ registrationData, onBack }) {
               <li>Enter the 6-digit code shown in your app below</li>
             </ol>
           </div>
+
+          {/* Recovery Codes Section */}
+          {registrationData.recovery_codes && registrationData.recovery_codes.length > 0 && (
+            <div className="bg-gradient-to-br from-orange-50 to-red-50 dark:from-orange-900/20 dark:to-red-900/20 border-2 border-orange-300 dark:border-orange-700 rounded-lg p-4">
+              <div className="flex items-start justify-between mb-3">
+                <div>
+                  <h3 className="text-sm font-bold text-orange-900 dark:text-orange-300 flex items-center gap-2">
+                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                    </svg>
+                    Recovery Codes
+                  </h3>
+                  <p className="text-xs text-orange-800 dark:text-orange-300 mt-1">
+                    Save these codes now! They can only be used once each.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowRecoveryCodes(!showRecoveryCodes)}
+                  className="text-orange-600 dark:text-orange-400 hover:text-orange-800 dark:hover:text-orange-200"
+                >
+                  <svg className={`w-5 h-5 transform transition-transform ${showRecoveryCodes ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+              </div>
+
+              {showRecoveryCodes && (
+                <>
+                  <div className="bg-white dark:bg-gray-800 rounded-lg p-4 mb-3 max-h-48 overflow-y-auto">
+                    <div className="grid grid-cols-2 gap-2">
+                      {registrationData.recovery_codes.map((code, idx) => (
+                        <div key={idx} className="flex items-center gap-2 p-2 bg-gray-50 dark:bg-gray-700 rounded border border-gray-200 dark:border-gray-600">
+                          <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 w-4">
+                            {idx + 1}.
+                          </span>
+                          <code className="text-sm font-mono text-gray-900 dark:text-white">
+                            {code}
+                          </code>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={copyRecoveryCodes}
+                      className="flex-1 px-3 py-2 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+                    >
+                      {recoveryCodesCopied ? (
+                        <>
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                          Copied!
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                          </svg>
+                          Copy Codes
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={downloadRecoveryCodes}
+                      className="flex-1 px-3 py-2 bg-orange-600 hover:bg-orange-700 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      </svg>
+                      Download
+                    </button>
+                  </div>
+
+                  <div className="mt-3 p-3 bg-red-100 dark:bg-red-900/30 border border-red-300 dark:border-red-700 rounded-lg">
+                    <p className="text-xs text-red-800 dark:text-red-300 font-medium">
+                      ⚠️ <strong>CRITICAL:</strong> These codes will NOT be shown again! Save them in a password manager or secure location before continuing.
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Verification Form */}
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -152,9 +261,9 @@ export default function TwoFAVerification({ registrationData, onBack }) {
           </form>
 
           {/* Security Notice */}
-          <div className="mt-6 p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
-            <p className="text-xs text-yellow-800 dark:text-yellow-300">
-              <strong>⚠️ Important:</strong> Save your backup codes in a secure location. You'll need them if you lose access to your authenticator app.
+          <div className="mt-6 p-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg">
+            <p className="text-xs text-green-800 dark:text-green-300">
+              <strong>🔒 Security Tip:</strong> Store your recovery codes in a password manager or write them down and keep them in a secure physical location. You'll need them if you lose your phone or authenticator app.
             </p>
           </div>
         </div>

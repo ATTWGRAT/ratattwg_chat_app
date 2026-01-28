@@ -1,11 +1,19 @@
 """Authentication utilities for signature verification and timestamp validation."""
 
 import json
-import time
 from functools import wraps
-from flask import request, jsonify, session, current_app
-from app import db
+from flask import request, session
 from app.models import User
+from app.helpers import is_valid_timestamp as helper_is_valid_timestamp
+from app.constants import (
+    SIGNATURE_MAX_AGE,
+    ERROR_NO_SIGNATURE_DATA, ERROR_INVALID_SIGNATURE_FORMAT, ERROR_NO_DATA_PROVIDED,
+    ERROR_SIGNATURE_REQUIRED, ERROR_TIMESTAMP_EXPIRED, ERROR_DATA_FIELD_REQUIRED,
+    ERROR_NOT_AUTHENTICATED, ERROR_USER_NOT_FOUND, ERROR_INVALID_SIGNATURE
+)
+from app.errors import (
+    validation_error_response, unauthorized_response, not_found_response
+)
 from Crypto.PublicKey import ECC
 from Crypto.Signature import eddsa
 from Crypto.Hash import SHA256
@@ -41,32 +49,19 @@ def verify_signature(public_key_pem, data, signature_hex):
         return False
 
 
-def validate_timestamp(timestamp, max_age_seconds=300):
+def validate_timestamp(timestamp, max_age_seconds=SIGNATURE_MAX_AGE):
     """
     Validate timestamp is recent to prevent replay attacks.
     
     Args:
         timestamp: Unix timestamp in seconds
-        max_age_seconds: Maximum age of request in seconds (default 5 minutes)
+        max_age_seconds: Maximum age of request in seconds (default from SIGNATURE_MAX_AGE constant)
         
     Returns:
         bool: True if timestamp is valid
     """
-    try:
-        timestamp = int(timestamp)
-        current_time = int(time.time())
-        
-        # Check if timestamp is not too old
-        if current_time - timestamp > max_age_seconds:
-            return False
-        
-        # Check if timestamp is not in the future (allow 30 seconds clock drift)
-        if timestamp - current_time > 30:
-            return False
-        
-        return True
-    except (ValueError, TypeError):
-        return False
+    # Use the helper function from helpers.py
+    return helper_is_valid_timestamp(timestamp, max_age_seconds)
 
 
 def require_signature(f):
@@ -86,42 +81,42 @@ def require_signature(f):
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # Get request data - check header for GET requests, body for POST
-        if request.method == 'GET':
+        # Get request data - check header for GET/DELETE requests, body for POST/PUT
+        if request.method in ['GET', 'DELETE']:
             signature_header = request.headers.get('X-Signature-Data')
             if not signature_header:
-                return jsonify({'error': 'No signature data provided'}), 400
+                return validation_error_response(ERROR_NO_SIGNATURE_DATA)
             try:
                 request_body = json.loads(signature_header)
             except json.JSONDecodeError:
-                return jsonify({'error': 'Invalid signature data format'}), 400
+                return validation_error_response(ERROR_INVALID_SIGNATURE_FORMAT)
         else:
             request_body = request.get_json()
             if not request_body:
-                return jsonify({'error': 'No data provided'}), 400
+                return validation_error_response(ERROR_NO_DATA_PROVIDED)
         
         # Check required fields
         if 'signature' not in request_body:
-            return jsonify({'error': 'Signature is required'}), 400
+            return validation_error_response(ERROR_SIGNATURE_REQUIRED)
         
         if 'timestamp' not in request_body:
-            return jsonify({'error': 'Timestamp is required'}), 400
+            return validation_error_response(ERROR_SIGNATURE_REQUIRED)
         
         if 'data' not in request_body:
-            return jsonify({'error': 'Data field is required'}), 400
+            return validation_error_response(ERROR_DATA_FIELD_REQUIRED)
         
         # Validate timestamp
         if not validate_timestamp(request_body['timestamp']):
-            return jsonify({'error': 'Invalid or expired timestamp'}), 401
+            return unauthorized_response(ERROR_TIMESTAMP_EXPIRED)
         
         # Get user from session
         if 'user_id' not in session:
-            return jsonify({'error': 'Not authenticated'}), 401
+            return unauthorized_response(ERROR_NOT_AUTHENTICATED)
         
         user = User.query.get(session['user_id'])
         if not user:
             session.clear()
-            return jsonify({'error': 'User not found'}), 404
+            return not_found_response(ERROR_USER_NOT_FOUND)
         
         # Verify signature
         data_to_verify = {
@@ -130,7 +125,7 @@ def require_signature(f):
         }
         
         if not verify_signature(user.public_key, data_to_verify, request_body['signature']):
-            return jsonify({'error': 'Invalid signature'}), 401
+            return unauthorized_response(ERROR_INVALID_SIGNATURE)
         
         # Replace request data with the inner data for the route handler
         request.signed_data = request_body['data']
@@ -139,80 +134,3 @@ def require_signature(f):
         return f(*args, **kwargs)
     
     return decorated_function
-
-
-def require_signature_with_identifier(f):
-    """
-    Decorator for routes that don't have a session yet (like login).
-    Requires email or username in the data to look up the public key.
-    
-    Expected request format:
-    {
-        "data": {
-            "email": "..." OR "username": "...",
-            ... other data ...
-        },
-        "signature": "hex_signature",
-        "timestamp": 1234567890
-    }
-    """
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        # Get request data
-        request_body = request.get_json()
-        
-        if not request_body:
-            return jsonify({'error': 'No data provided'}), 400
-        
-        # Check required fields
-        if 'signature' not in request_body:
-            return jsonify({'error': 'Signature is required'}), 400
-        
-        if 'timestamp' not in request_body:
-            return jsonify({'error': 'Timestamp is required'}), 400
-        
-        if 'data' not in request_body:
-            return jsonify({'error': 'Data field is required'}), 400
-        
-        # Check for email or username
-        email = request_body['data'].get('email')
-        username = request_body['data'].get('username')
-        
-        if not email and not username:
-            return jsonify({'error': 'Email or username is required in data'}), 400
-        
-        # Validate timestamp
-        if not validate_timestamp(request_body['timestamp']):
-            return jsonify({'error': 'Invalid or expired timestamp'}), 401
-        
-        # Get user by email or username
-        if email:
-            user = User.query.filter_by(email=email).first()
-            if not user:
-                return jsonify({'error': 'Invalid email'}), 401
-        else:
-            user = User.query.filter_by(username=username).first()
-            if not user:
-                return jsonify({'error': 'Invalid username'}), 401
-        
-        # Verify signature
-        data_to_verify = {
-            'data': request_body['data'],
-            'timestamp': request_body['timestamp']
-        }
-        
-        if not verify_signature(user.public_key, data_to_verify, request_body['signature']):
-            return jsonify({'error': 'Invalid signature'}), 401
-        
-        # Replace request data with the inner data for the route handler
-        request.signed_data = request_body['data']
-        request.verified_timestamp = request_body['timestamp']
-        request.verified_user = user
-        
-        return f(*args, **kwargs)
-    
-    return decorated_function
-
-
-# Backward compatibility alias
-require_signature_with_username = require_signature_with_identifier

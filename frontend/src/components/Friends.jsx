@@ -2,7 +2,7 @@
  * Friends component - Search users, send/manage friend requests
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   searchUsers,
   sendFriendRequest,
@@ -10,8 +10,18 @@ import {
   getSentFriendRequests,
   acceptFriendRequest,
   rejectFriendRequest,
-  getFriendsList
+  getFriendsList,
+  removeFriend
 } from '../utils/api';
+import {
+  getSocket,
+  onFriendRequestReceived,
+  onFriendRequestAccepted,
+  onFriendRequestRejected,
+  onFriendRemoved,
+  onUserRegistered,
+  removeAllListeners
+} from '../utils/socket';
 import {
   generateConversationKey,
   encryptWithPublicKey,
@@ -22,8 +32,12 @@ import {
   importPublicKeyFromPEM,
   bytesToHex
 } from '../utils/crypto';
+import { Button } from './ui/Button';
+import { Avatar } from './ui/Avatar';
+import { Alert } from './ui/Alert';
+import { LoadingOverlay } from './ui/Spinner';
 
-export default function Friends({ privateKey, masterKey, username, onSelectConversation }) {
+export default function Friends({ privateKey, masterKey, username, onSelectConversation, onConversationClosed }) {
   const [activeTab, setActiveTab] = useState('search'); // search, pending, friends
   const [searchTerm, setSearchTerm] = useState('');
   const [allUsers, setAllUsers] = useState([]); // All users for filtering
@@ -46,23 +60,69 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
     loadAllUsers();
   }, []);
 
-  // Poll for updates every 15 seconds
+  // Listen for WebSocket events (socket initialized in AuthContext)
   useEffect(() => {
-    const pollInterval = setInterval(() => {
-      loadPendingRequests();
-      loadSentRequests();
+    const socket = getSocket();
+    if (!socket) return; // Socket not ready yet
+
+    // Listen for incoming friend requests
+    onFriendRequestReceived((requestData) => {
+      setPendingRequests(prev => [...prev, requestData]);
+      setSuccess(`New friend request from ${requestData.sender.username}!`);
+      setTimeout(() => setSuccess(''), 3000);
+    });
+
+    // Listen for accepted friend requests
+    onFriendRequestAccepted((data) => {
+      // Remove from sent requests
+      setSentRequests(prev => prev.filter(req => req.receiver.id !== data.friend_id));
+      // Reload friends list to show new friend
       loadFriendsList();
-      loadAllUsers(); // Also reload users to detect rejected requests
-    }, 15000); // Poll every 15 seconds
+      setSuccess('Your friend request was accepted!');
+      setTimeout(() => setSuccess(''), 3000);
+    });
 
-    return () => clearInterval(pollInterval);
-  }, [privateKey]);
+    // Listen for rejected friend requests
+    onFriendRequestRejected((data) => {
+      // Remove from sent requests
+      setSentRequests(prev => prev.filter(req => req.id !== data.request_id));
+      // Reload all users so rejected user appears in search again
+      loadAllUsers();
+    });
 
-  // Filter users client-side as user types
-  useEffect(() => {
+    // Listen for friend removal
+    onFriendRemoved((data) => {
+      // Remove from friends list
+      setFriendsList(prev => prev.filter(friend => friend.id !== data.removed_friend_id));
+      // Close conversation if it was open
+      if (data.conversation_id && onConversationClosed) {
+        onConversationClosed(data.conversation_id);
+      }
+    });
+
+    // Listen for new user registrations
+    onUserRegistered((newUser) => {
+      // Add new user to allUsers list so they appear in search
+      setAllUsers(prev => {
+        // Check if user already exists to avoid duplicates
+        if (prev.some(u => u.id === newUser.id)) {
+          return prev;
+        }
+        return [...prev, newUser];
+      });
+    });
+
+    // Cleanup on unmount - remove listeners but DON'T disconnect socket (it's shared globally)
+    return () => {
+      removeAllListeners();
+      // Socket is managed by AuthContext, don't disconnect here
+    };
+  }, [privateKey, onConversationClosed]);
+
+  // Memoize search results for performance
+  const filteredSearchResults = useMemo(() => {
     if (searchTerm.length < 1) {
-      setSearchResults([]);
-      return;
+      return [];
     }
 
     // Get IDs of users who are already friends
@@ -71,15 +131,19 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
     // Get IDs of users with pending sent requests
     const sentRequestIds = new Set(sentRequests.map(req => req.receiver.id));
     
-    const filtered = allUsers.filter(user => 
+    return allUsers.filter(user => 
       user.username.toLowerCase().includes(searchTerm.toLowerCase()) &&
       !friendIds.has(user.id) && // Exclude existing friends
       !sentRequestIds.has(user.id) // Exclude users with pending requests
     );
-    setSearchResults(filtered);
   }, [searchTerm, allUsers, friendsList, sentRequests]);
 
-  const loadAllUsers = async () => {
+  // Update searchResults when filtered results change
+  useEffect(() => {
+    setSearchResults(filteredSearchResults);
+  }, [filteredSearchResults]);
+
+  const loadAllUsers = useCallback(async () => {
     try {
       setLoading(true);
       const users = await searchUsers(privateKey);
@@ -90,36 +154,36 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
     } finally {
       setLoading(false);
     }
-  };
+  }, [privateKey]);
 
-  const loadPendingRequests = async () => {
+  const loadPendingRequests = useCallback(async () => {
     try {
       const requests = await getPendingFriendRequests(privateKey);
       setPendingRequests(requests);
     } catch (err) {
       console.error('Failed to load pending requests:', err);
     }
-  };
+  }, [privateKey]);
 
-  const loadSentRequests = async () => {
+  const loadSentRequests = useCallback(async () => {
     try {
       const requests = await getSentFriendRequests(privateKey);
       setSentRequests(requests);
     } catch (err) {
       console.error('Failed to load sent requests:', err);
     }
-  };
+  }, [privateKey]);
 
-  const loadFriendsList = async () => {
+  const loadFriendsList = useCallback(async () => {
     try {
       const friends = await getFriendsList(privateKey);
       setFriendsList(friends);
     } catch (err) {
       console.error('Failed to load friends list:', err);
     }
-  };
+  }, [privateKey]);
 
-  const handleSendFriendRequest = async (user) => {
+  const handleSendFriendRequest = useCallback(async (user) => {
     setLoading(true);
     setError('');
     setSuccess('');
@@ -163,9 +227,9 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
     } finally {
       setLoading(false);
     }
-  };
+  }, [privateKey, masterKey, loadSentRequests]);
 
-  const handleAcceptRequest = async (request) => {
+  const handleAcceptRequest = useCallback(async (request) => {
     setLoading(true);
     setError('');
     setSuccess('');
@@ -222,9 +286,9 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
     } finally {
       setLoading(false);
     }
-  };
+  }, [privateKey, masterKey, username, pendingRequests, loadFriendsList]);
 
-  const handleRejectRequest = async (request) => {
+  const handleRejectRequest = useCallback(async (request) => {
     setLoading(true);
     setError('');
     setSuccess('');
@@ -243,7 +307,32 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
     } finally {
       setLoading(false);
     }
-  };
+  }, [privateKey, pendingRequests, loadAllUsers]);
+
+  const handleRemoveFriend = useCallback(async (friend) => {
+    if (!confirm(`Are you sure you want to remove ${friend.username} from your friends?`)) {
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      await removeFriend(friend.id, privateKey);
+      setSuccess(`${friend.username} removed from friends`);
+      
+      // Update friends list immediately
+      setFriendsList(friendsList.filter(f => f.id !== friend.id));
+      
+      // Reload all users so they appear in search again
+      await loadAllUsers();
+    } catch (err) {
+      setError(err.message || 'Failed to remove friend');
+    } finally {
+      setLoading(false);
+    }
+  }, [privateKey, friendsList, loadAllUsers]);
 
   return (
     <div className="h-full flex flex-col bg-white dark:bg-gray-800">
@@ -297,21 +386,15 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
         </div>
       </div>
 
-      {/* Messages */}
-      {(error || success) && (
-        <div className="p-4">
-          {error && (
-            <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
-              <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
-            </div>
-          )}
-          {success && (
-            <div className="p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg">
-              <p className="text-sm text-green-600 dark:text-green-400">{success}</p>
-            </div>
-          )}
-        </div>
-      )}
+      {/* Toast Notifications - Fixed Position */}
+      <div className="fixed top-4 right-4 z-50 space-y-2 max-w-md">
+        {error && (
+          <Alert type="error" message={error} onClose={() => setError('')} />
+        )}
+        {success && (
+          <Alert type="success" message={success} onClose={() => setSuccess('')} />
+        )}
+      </div>
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4">
@@ -342,11 +425,7 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
                     className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors"
                   >
                     <div className="flex items-center space-x-3">
-                      <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
-                        <span className="text-white font-bold text-lg">
-                          {user.username.charAt(0).toUpperCase()}
-                        </span>
-                      </div>
+                      <Avatar name={user.username} size="md" />
                       <div>
                         <p className="font-medium text-gray-900 dark:text-white">{user.username}</p>
                         <p className="text-xs text-gray-500 dark:text-gray-400">User ID: {user.id}</p>
@@ -360,16 +439,17 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
                         Pending
                       </div>
                     ) : (
-                      <button
+                      <Button
+                        variant="primary"
+                        size="sm"
                         onClick={() => handleSendFriendRequest(user)}
                         disabled={loading}
-                        className="px-4 py-2 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-medium rounded-lg transition-all disabled:opacity-50"
                       >
                         <svg className="inline w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                         </svg>
                         Add Friend
-                      </button>
+                      </Button>
                     )}
                   </div>
                 ))}
@@ -403,11 +483,7 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
                 >
                   <div className="flex items-start justify-between mb-3">
                     <div className="flex items-center space-x-3">
-                      <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
-                        <span className="text-white font-bold text-xl">
-                          {request.sender.username.charAt(0).toUpperCase()}
-                        </span>
-                      </div>
+                      <Avatar name={request.sender.username} size="lg" />
                       <div>
                         <p className="font-medium text-gray-900 dark:text-white">
                           {request.sender.username}
@@ -439,26 +515,28 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
                     </button>
                   </div>
                   <div className="flex gap-2">
-                    <button
+                    <Button
+                      variant="primary"
+                      className="flex-1 !bg-green-500 hover:!bg-green-600"
                       onClick={() => handleAcceptRequest(request)}
                       disabled={loading}
-                      className="flex-1 px-4 py-2 bg-green-500 hover:bg-green-600 text-white font-medium rounded-lg transition-colors disabled:opacity-50"
                     >
                       <svg className="inline w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                       </svg>
                       Accept
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="danger"
+                      className="flex-1"
                       onClick={() => handleRejectRequest(request)}
                       disabled={loading}
-                      className="flex-1 px-4 py-2 bg-red-500 hover:bg-red-600 text-white font-medium rounded-lg transition-colors disabled:opacity-50"
                     >
                       <svg className="inline w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                       </svg>
                       Reject
-                    </button>
+                    </Button>
                   </div>
                 </div>
               ))
@@ -480,25 +558,42 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
               friendsList.map(friend => (
                 <div
                   key={friend.id}
-                  onClick={() => onSelectConversation && onSelectConversation(friend.conversation_id)}
-                  className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors cursor-pointer"
+                  className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors"
                 >
-                  <div className="flex items-center space-x-3">
-                    <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
-                      <span className="text-white font-bold text-lg">
-                        {friend.username.charAt(0).toUpperCase()}
-                      </span>
-                    </div>
-                    <div>
+                  <div 
+                    className="flex items-center space-x-3 flex-1 cursor-pointer"
+                    onClick={() => onSelectConversation && onSelectConversation(friend.conversation_id, {
+                      id: friend.id,
+                      username: friend.username,
+                      public_key: friend.public_key
+                    })}
+                  >
+                    <Avatar name={friend.username} size="md" />
+                    <div className="flex-1">
                       <p className="font-medium text-gray-900 dark:text-white">{friend.username}</p>
                       <p className="text-xs text-gray-500 dark:text-gray-400">
                         Friends since {new Date(friend.friends_since).toLocaleDateString()}
                       </p>
                     </div>
                   </div>
-                  <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleRemoveFriend(friend);
+                      }}
+                      disabled={loading}
+                      className="p-2 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20 rounded-lg transition-colors disabled:opacity-50"
+                      title="Remove friend"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                    </button>
+                    <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </div>
                 </div>
               ))
             ) : (
@@ -541,11 +636,7 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
               {/* Sender Info */}
               <div className="mb-6 p-4 bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-900/20 dark:to-purple-900/20 rounded-lg">
                 <div className="flex items-center space-x-4">
-                  <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
-                    <span className="text-white font-bold text-2xl">
-                      {selectedRequest.sender.username.charAt(0).toUpperCase()}
-                    </span>
-                  </div>
+                  <Avatar name={selectedRequest.sender.username} size="lg" />
                   <div>
                     <p className="text-lg font-semibold text-gray-900 dark:text-white">
                       {selectedRequest.sender.username}
@@ -563,12 +654,13 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
                   <h4 className="text-lg font-semibold text-gray-900 dark:text-white">
                     Encrypted Conversation Key
                   </h4>
-                  <button
+                  <Button
+                    variant="primary"
+                    size="sm"
                     onClick={() => setShowKeyData(!showKeyData)}
-                    className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition-colors"
                   >
                     {showKeyData ? 'Hide Key' : 'Show Key'}
-                  </button>
+                  </Button>
                 </div>
 
                 {showKeyData && (
@@ -615,7 +707,9 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
 
               {/* Action Buttons */}
               <div className="flex gap-3">
-                <button
+                <Button
+                  variant="primary"
+                  className="flex-1 !bg-green-500 hover:!bg-green-600"
                   onClick={() => {
                     handleAcceptRequest(selectedRequest);
                     setSelectedRequest(null);
@@ -623,14 +717,16 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
                     setDecryptedKey(null);
                   }}
                   disabled={loading}
-                  className="flex-1 px-6 py-3 bg-green-500 hover:bg-green-600 text-white font-medium rounded-lg transition-colors disabled:opacity-50"
+                  loading={loading}
                 >
                   <svg className="inline w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                   </svg>
                   Accept Request
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="danger"
+                  className="flex-1"
                   onClick={() => {
                     handleRejectRequest(selectedRequest);
                     setSelectedRequest(null);
@@ -638,13 +734,13 @@ export default function Friends({ privateKey, masterKey, username, onSelectConve
                     setDecryptedKey(null);
                   }}
                   disabled={loading}
-                  className="flex-1 px-6 py-3 bg-red-500 hover:bg-red-600 text-white font-medium rounded-lg transition-colors disabled:opacity-50"
+                  loading={loading}
                 >
                   <svg className="inline w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                   </svg>
                   Reject Request
-                </button>
+                </Button>
               </div>
             </div>
           </div>

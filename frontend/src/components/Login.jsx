@@ -2,56 +2,57 @@
  * Login component with signature verification
  */
 
-import { useState } from 'react';
+import { useCallback } from 'react';
 import { generateMasterKey, hashPassword, decryptPrivateKey } from '../utils/crypto';
 import { login as apiLogin } from '../utils/api';
 import { useAuth } from '../context/AuthContext';
+import { useForm } from '../hooks/useForm';
+import { useAsync } from '../hooks/useAsync';
+import { Button } from './ui/Button';
+import { Input } from './ui/Input';
+import { Alert } from './ui/Alert';
 
-export default function Login({ onSwitchToRegister }) {
-  const [formData, setFormData] = useState({
+export default function Login({ onSwitchToRegister, onSwitchToRecovery }) {
+  const { login } = useAuth();
+  const { values, errors, handleChange, setFieldValue, setFieldError } = useForm({
     email: '',
     password: '',
     totpCode: ''
   });
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const { login } = useAuth();
+  const { loading, error, execute, clearError } = useAsync();
 
-  const handleChange = (e) => {
-    const value = e.target.name === 'totpCode' 
-      ? e.target.value.replace(/\D/g, '').slice(0, 6)
-      : e.target.value;
-    
-    setFormData({
-      ...formData,
-      [e.target.name]: value
-    });
-    setError('');
-  };
+  const handleTotpChange = useCallback((e) => {
+    const value = e.target.value.replace(/\D/g, '').slice(0, 6);
+    setFieldValue('totpCode', value);
+    clearError();
+  }, [setFieldValue, clearError]);
 
-  const handleSubmit = async (e) => {
+  const handleInputChange = useCallback((e) => {
+    handleChange(e);
+    clearError();
+  }, [handleChange, clearError]);
+
+  const handleSubmit = useCallback(async (e) => {
     e.preventDefault();
     
-    if (!formData.email || !formData.password || formData.totpCode.length !== 6) {
-      setError('Please fill in all fields with valid values');
+    // Validation
+    if (!values.email || !values.password || values.totpCode.length !== 6) {
+      setFieldError('totpCode', 'Please fill in all fields with valid values');
       return;
     }
 
-    setLoading(true);
-    setError('');
-
-    try {
+    await execute(async () => {
       // 1. Generate Master Key: PBKDF2(password, email)
-      const masterKey = await generateMasterKey(formData.password, formData.email);
+      const masterKey = await generateMasterKey(values.password, values.email);
 
       // 2. Hash password: Argon2ID(masterKey, password)
-      const passwordHash = await hashPassword(masterKey, formData.password);
+      const passwordHash = await hashPassword(masterKey, values.password);
       
       // 3. Send login request
       const response = await apiLogin(
-        formData.email,
+        values.email,
         passwordHash,
-        formData.totpCode
+        values.totpCode
       );
 
       // 4. Decrypt private key with Master Key
@@ -62,21 +63,9 @@ export default function Login({ onSwitchToRegister }) {
       );
 
       // 5. Store session in auth context (with Master Key and private key in memory)
-      await login(response.user, formData.password, masterKey, privateKey);
-
-    } catch (error) {
-      console.error('Login error:', error);
-      if (error.message.includes('User not found')) {
-        setError('No account found with this email. Please register first.');
-      } else if (error.message.includes('Malformed')) {
-        setError('Invalid password or corrupted key data');
-      } else {
-        setError(error.message || 'Login failed. Please check your credentials.');
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
+      await login(response.user, values.password, masterKey, privateKey);
+    });
+  }, [values, execute, login, setFieldError]);
 
   return (
     <div className="w-full max-w-md">
@@ -92,86 +81,77 @@ export default function Login({ onSwitchToRegister }) {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">
-          <div>
-            <label htmlFor="email" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Email
-            </label>
-            <input
-              type="email"
-              id="email"
-              name="email"
-              value={formData.email}
-              onChange={handleChange}
-              required
-              className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 transition-all"
-              placeholder="Enter your email"
-              disabled={loading}
-            />
-          </div>
+          <Input
+            type="email"
+            id="email"
+            name="email"
+            label="Email"
+            value={values.email}
+            onChange={handleInputChange}
+            error={errors.email}
+            placeholder="Enter your email"
+            disabled={loading}
+            required
+          />
+
+          <Input
+            type="password"
+            id="password"
+            name="password"
+            label="Password"
+            value={values.password}
+            onChange={handleInputChange}
+            error={errors.password}
+            placeholder="Enter your password"
+            disabled={loading}
+            required
+          />
 
           <div>
-            <label htmlFor="password" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Password
-            </label>
-            <input
-              type="password"
-              id="password"
-              name="password"
-              value={formData.password}
-              onChange={handleChange}
-              required
-              className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 transition-all"
-              placeholder="Enter your password"
-              disabled={loading}
-            />
-          </div>
-
-          <div>
-            <label htmlFor="totpCode" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              2FA Code
-            </label>
-            <input
+            <Input
               type="text"
               id="totpCode"
               name="totpCode"
-              value={formData.totpCode}
-              onChange={handleChange}
-              required
+              label="2FA Code"
+              value={values.totpCode}
+              onChange={handleTotpChange}
+              error={errors.totpCode}
               maxLength={6}
               pattern="\d{6}"
-              className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 text-center text-xl font-mono tracking-widest transition-all"
+              className="text-center text-xl font-mono tracking-widest"
               placeholder="000000"
               disabled={loading}
               autoComplete="off"
+              required
             />
             <p className="mt-2 text-xs text-gray-500 dark:text-gray-400 text-center">
               Enter the code from your authenticator app
             </p>
+            <div className="mt-2 text-center">
+              <button
+                type="button"
+                onClick={onSwitchToRecovery}
+                className="text-xs text-orange-600 dark:text-orange-400 hover:text-orange-700 dark:hover:text-orange-300 font-medium transition-colors"
+                disabled={loading}
+              >
+                Can't access your authenticator? Use a recovery code →
+              </button>
+            </div>
           </div>
 
           {error && (
-            <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
-              <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
-            </div>
+            <Alert type="error" message={error} onClose={clearError} />
           )}
 
-          <button
+          <Button
             type="submit"
-            disabled={loading || formData.totpCode.length !== 6}
-            className="w-full py-3 px-4 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-semibold rounded-lg shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+            variant="primary"
+            disabled={loading || values.totpCode.length !== 6}
+            loading={loading}
+            fullWidth
           >
-            {loading ? (
-              <span className="flex items-center justify-center">
-                <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                Signing In...
-              </span>
-            ) : (
-              'Sign In'
-            )}
-          </button>
+            Sign In
+          </Button>
         </form>
 
         <div className="mt-6 text-center">
